@@ -6,7 +6,6 @@ from pipelines.models import TextToImageRequest
 from torch import Generator
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from tgate import TgateSDXLLoader, TgateSDXLDeepCacheLoader
 
 import torch
 from transformers import (
@@ -59,12 +58,6 @@ if is_torch_xla_available():
     XLA_AVAILABLE = True
 else:
     XLA_AVAILABLE = False
-
-gate_step = 9
-inference_step = 9
-sp_interval = 1
-fi_interval = 7
-warm_up = 0
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -1290,23 +1283,20 @@ class StableDiffusionXLPipeline(
 
 
 def load_pipeline() -> StableDiffusionXLPipeline:
+    vae = AutoencoderTiny.from_pretrained(
+    'madebyollin/taesdxl',
+    use_safetensors=True,
+    torch_dtype=torch.float16,
+    ).to('cuda')
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         "./models/newdream-sdxl-20",
         torch_dtype=torch.float16,
         use_safetensors=True,
         local_files_only=True,
+        vae=vae
     )
     #pipeline.vae = AutoencoderTiny.from_pretrained("madebyollin/taesdxl", torch_dtype=torch.float16)
     pipeline.scheduler = UniPCMultistepScheduler.from_config('./src/config',)
-    pipeline = TgateSDXLLoader(
-        pipeline,
-        gate_step=gate_step,
-        sp_interval=sp_interval,
-        fi_interval=fi_interval,
-        warm_up=warm_up,
-        num_inference_steps=inference_step,
-    )
-
     pipeline.to("cuda")
 
     compilation_config = CompilationConfig.Default()
@@ -1321,9 +1311,9 @@ def load_pipeline() -> StableDiffusionXLPipeline:
         compilation_config.enable_triton = True
     except ImportError:
         print('Triton not installed, skip')
-    compilation_config.enable_cuda_graph = True
+    # compilation_config.enable_cuda_graph = True
     pipeline = compile(pipeline, compilation_config)
-    for _ in range(3):
+    for _ in range(4):
         pipeline(prompt="an astronaut on a horse", num_inference_steps=14)
 
     return pipeline
@@ -1332,14 +1322,11 @@ def load_pipeline() -> StableDiffusionXLPipeline:
 def infer(request: TextToImageRequest, pipeline: StableDiffusionXLPipeline) -> Image:
     generator = Generator(pipeline.device).manual_seed(request.seed) if request.seed else None
 
-    image = pipeline.tgate(
-        request.prompt,
-        gate_step=gate_step,
-        num_inference_steps=inference_step,
+    return pipeline(
+        prompt=request.prompt,
         negative_prompt=request.negative_prompt,
         width=request.width,
         height=request.height,
         generator=generator,
+        num_inference_steps=4,
     ).images[0]
-
-    return image
